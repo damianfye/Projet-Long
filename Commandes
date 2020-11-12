@@ -1,0 +1,12 @@
+# Commandes
+python src/other/list2list_i.py data/pdbID_list_test.txt > data/pdbID_list_test_i.txt 
+
+python src/get_interface_asa.py -l data/pdbID_list_test.txt -d data/PDB/ -o data/ASA/
+
+python src/encode_X.py -l data/pdbID_list_test_i.txt -d data/PDB/ -o data/X_input
+
+python src/window_X.py -l data/pdbID_list_test_i.txt -x data/X_input -w 5 -o data/X_input_window/
+
+python src/create_CVlists.py -l data/pdbID_list_test_i.txt  -o data/Inputs_Outputs/CV_test
+
+python src/create_inputs.py -cv data/Inputs_Outputs/CV_test/  -x data/X_input_window/ -y data/ASA/ -d 5 104
