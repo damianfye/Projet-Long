@@ -6,7 +6,8 @@ DOCKSTRINGS FFS
 import os
 import sys
 import subprocess
-import argparse 
+import argparse
+
 import pandas as pd 
 import numpy as np 
 import pbxplore
@@ -28,16 +29,16 @@ def args():
     # Parse arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("-p1", "--protein1", help="Path to the protein to predict in PDB format.", type=str, required=True)
-    parser.add_argument("-p", "--pssm", help="Path to the PsiBlast PSSM of protein1.", type=str, required=True)
+    parser.add_argument("-p", "--pssm", help="Path to the PSI-BLAST PSSM of protein1.", type=str, required=True)
     parser.add_argument("-p2", "--protein2", help="Path to the protein binded to protein1 in PDB format. If selected, the program will be in test mode.", type=str, required=False)
-    parser.add_argument("-m", "--model", help="Path to the network model.", type=str, required=True)    #Will be hardcodded soon
     parser.add_argument("-o", "--output", help="Path to the output directory.", type=str, required=True)
-    parser.add_argument("-n", "--neighbors", help="Radius max between predicted interface residue to be considered neighbors.", type=float, default=5)
-    parser.add_argument("-c", "--cluster", help="Distance max between predicted interface residue to be considered in the same cluster. (aggregative clustering)", type=float, default=10)
+    parser.add_argument("-c", "--color", help="Type of coloring used to replace the alpha-carbon B-factor column in the PDB file.", type=str, default="prediction", choices=["prediction", "probability", "neighbors", "cluster"], required=False)
+    parser.add_argument("-nd", "--neighbors", help="Radius max between predicted interface residue to be considered neighbors.", type=float, default=5, required=False)
+    parser.add_argument("-cd", "--cluster", help="Distance max between predicted interface residue to be considered in the same cluster. (aggregative clustering)", type=float, default=10, required=False)
+    parser.add_argument("-m", "--model", help="Path to the network model.", type=str, required=False, default="../result/model/model.h5")
     args = parser.parse_args()
 
-    return args.protein1, args.pssm, args.protein2, args.model, args.output, args.neighbors, args.cluster
-
+    return args.protein1, args.pssm, args.protein2, args.model, args.output, args.neighbors, args.cluster, args.color
 
 
 import tensorflow as tf
@@ -115,6 +116,39 @@ def parse_pdb(pdb_file):
     arr_coors = pd.DataFrame(rows, columns=["atom_num", "atom_name", "res_name", "chain_id", "res_num", "x", "y", "z"])
 
     return arr_coors
+
+
+def color_pdb(pdb_file, output, bfactor):
+    """
+    Reads a PDB file and returns a list of list (PDB file lines) and a NumPy array (PDB file coordinates).
+
+    Arguments
+    ---------
+    pdb_file (string): Path to the PDB file
+
+    Returns
+    -------
+    arr_coors (NumPy array): Coordinates of each atom of the PDB file
+    rows (list): All sequence information
+    """
+    # List of list containing information about atoms from the PDB file
+    pdb_ID = os.path.basename(protein1).split(".")[0]
+
+    with open(pdb_file, "r") as f_in, open(os.path.join(output, f"{pdb_ID}_colored.pdb"), "w") as f_out:
+        # Go through the file 
+        i = 0
+        for line in f_in:
+            # If requiered take the first NMR structure
+            if line.startswith("ENDMDL"):
+               break
+            # Extracts informations from the PDB
+            if line.startswith("ATOM") and line[12:16].strip() == "CA":
+                line = line[:60] + f"{bfactor[i]:6.2f}" + line[66:]
+                i += 1
+
+            f_out.write(line)
+
+
 
 
 def pdb2fasta(pdb_file):
@@ -404,14 +438,21 @@ def res_type_test(pdb_file1, pdb_file2):
     return arr_res_type
 
 
-
+def del_TER(pdb_file):
+    with open(pdb_file, "r") as f:
+        lines = f.readlines()
+    with open(pdb_file, "w") as f:
+        for line in lines:
+            if not line.startswith("TER"):
+                f.write(line)
 
 
 
 if __name__ == "__main__":
 
-    protein1, pssm, protein2, modelh5, OUTPUT, dist_neighbors, dist_cluster = args()
+    protein1, pssm, protein2, modelh5, OUTPUT, dist_neighbors, dist_cluster, color = args()
 
+    print(protein1)
 
     # Create the output directory
     try:
@@ -422,15 +463,20 @@ if __name__ == "__main__":
         print(f"Successfully created the directory {OUTPUT}.")
 
 
+    pdb_ID = os.path.basename(protein1).split(".")[0]
+
+
     # Load model
-    model = load_model(modelh5)
+    model = load_model(modelh5, compile=False)
+
 
     model.compile(loss=tf.keras.losses.BinaryCrossentropy(),
                   optimizer="Adam",
-                  metrics=["accuracy",
-                           AUC(name="auc")],
+                  metrics=["accuracy"],
                   weighted_metrics=["accuracy"])
 
+    ####################################################################################################################
+    del_TER(protein1)
 
     #Create X
     arr_merge, fasta_seq = encode_x(protein1, pssm)
@@ -443,10 +489,6 @@ if __name__ == "__main__":
     y_pred = model.predict(x_test, verbose=0)
     y_pred_classes = np.argmax(y_pred, axis=1)
     prob_y_pred = y_pred[:, 1]
-    #prob_y_pred = np.amax(y_pred, axis=1)
-
-    #Res type
-    arr_res_type = res_type(protein1)
 
     # Number of neighbors
     arr_coors = parse_pdb(protein1)
@@ -469,44 +511,42 @@ if __name__ == "__main__":
     arr_cluster[y_pred_classes == 1] = labels
     arr_cluster = arr_cluster.astype(int)
 
-    """
-    fig = plt.figure()
-    ax = plt.axes(projection = "3d")
-
-    # Creating plot
-    ax.scatter3D(arr_coors[:, 0], arr_coors[:, 1], arr_coors[:, 2], c=labels, marker="o")
-    #plt.title("simple 3D scatter plot")
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    # show plot
-    plt.show()
-    """
+    # Solvant accessibility (ASA)
+    asa = pdb2asa(protein1)
     
-    """
-    zippedList =  list(zip(seq_AA, y_pred_classes, prob_y_pred, bin_asa, arr_res_type, arr_nb_neighbors, arr_cluster))
-    # Create a dataframe from zipped list
-    df = pd.DataFrame(zippedList, columns = ["res" , f"Ypred", "P_Ypred", "Ytrue", "res_type", "nb_neighbors", "cluster"])
-    df.to_csv(os.path.join(OUTPUT, "file.csv"), index=False, float_format="%.2f", sep="\t")
-    """
+    if color == "prediction":
+        color_class = y_pred_classes
+    elif color == "probability":
+        color_class = prob_y_pred
+    elif color == "neighbors":
+        color_class = arr_nb_neighbors
+    elif color == "cluster":
+        color_class = arr_cluster
 
-    if protein2:
+    color_pdb(protein1, OUTPUT, color_class)
+
+
+
+    if not protein2:
+        #Res type
+        arr_res_type = res_type(protein1)
+
+        zippedList =  list(zip(seq_AA, y_pred_classes, prob_y_pred, asa, arr_res_type, arr_nb_neighbors, arr_cluster))
+        # Create a dataframe from zipped list
+        df = pd.DataFrame(zippedList, columns = ["res" , f"Ypred", "P_Ypred", "ASA", "res_type", "nb_neighbors", "cluster"])
+        df.to_csv(os.path.join(OUTPUT, f"{pdb_ID}_pred.csv"), index=False, float_format="%.2f", sep="\t")
+
+
+    elif protein2:
+        #Res type
+        arr_res_type = res_type_test(protein1, protein2)
 
         #Load Y
         asa_diff = get_interface_asa(protein1, protein2)
         bin_asa = (asa_diff >= 1).astype(int)
         y_test = to_categorical(y=bin_asa, num_classes=2)
 
-        # Model evaluation
-        y_tmp = np.argmax(y_test, axis=1)   # Convert one-hot to index
-        class_weights_test = class_weight.compute_class_weight("balanced", classes=np.unique(y_tmp), y = y_tmp)
-        class_weights_test = dict(enumerate(class_weights_test))
-        sample_weights_test = class_weight.compute_sample_weight(class_weights_test, y_tmp)
-
-        scores = model.evaluate(x=x_test, y=y_test, sample_weight=sample_weights_test, verbose=0)
-        row = ["pdb_ID"] + scores + [matthews_corrcoef(y_tmp, y_pred_classes)] + [matthews_corrcoef(y_tmp, y_pred_classes, sample_weight=sample_weights_test)]
-
-        zippedList =  list(zip(seq_AA, y_pred_classes, prob_y_pred, bin_asa, arr_res_type, arr_nb_neighbors, arr_cluster))
+        zippedList =  list(zip(seq_AA, y_pred_classes, prob_y_pred, asa, bin_asa, arr_res_type, arr_nb_neighbors, arr_cluster))
         # Create a dataframe from zipped list
-        df = pd.DataFrame(zippedList, columns = ["res" , f"Ypred", "P_Ypred", "Ytrue", "res_type", "nb_neighbors", "cluster"])
-        df.to_csv(os.path.join(OUTPUT, "file.csv"), index=False, float_format="%.2f", sep="\t")
+        df = pd.DataFrame(zippedList, columns = ["res" , f"Ypred", "P_Ypred", "ASA", "Ytrue", "res_type", "nb_neighbors", "cluster"])
+        df.to_csv(os.path.join(OUTPUT, f"{pdb_ID}_pred_test.csv"), index=False, float_format="%.2f", sep="\t")
